@@ -48,16 +48,19 @@ if st.button('Run Simulation'):
     current_regime='neutral'
     regime_shifts=[]
     return_shift,_ = draw_regime_parameters(current_regime)
+
     for _ in range(CALIBRATION_MONTHS):
         new_regime = next_regime(current_regime)
         if new_regime != current_regime:
             current_regime = new_regime
             return_shift,_ = draw_regime_parameters(current_regime)
         regime_shifts.append(return_shift)
+
     calibration_offset = -np.mean(regime_shifts)
 
     all_paths=np.zeros((int(num_sims), months+1))
     terminal_values=np.zeros(int(num_sims))
+    simulation_irrs=np.full(int(num_sims), np.nan)
     bankrupt_count=0
 
     for sim in range(int(num_sims)):
@@ -71,6 +74,7 @@ if st.button('Run Simulation'):
             if ruined:
                 path.append(0)
                 continue
+
             new_regime = next_regime(current_regime)
             if new_regime != current_regime:
                 current_regime = new_regime
@@ -84,6 +88,7 @@ if st.button('Run Simulation'):
             scale=monthly_vol/t_std
 
             portfolio += monthly_cashflow
+
             if portfolio <=0:
                 portfolio=0
                 ruined=True
@@ -96,14 +101,31 @@ if st.button('Run Simulation'):
 
         if ruined:
             bankrupt_count +=1
+
         all_paths[sim]=path
         terminal_values[sim]=portfolio
+
+        cashflows = [-opening_portfolio]
+        for _m in range(months):
+            if monthly_cashflow > 0:
+                cashflows.append(-monthly_cashflow)
+            elif monthly_cashflow < 0:
+                cashflows.append(abs(monthly_cashflow))
+            else:
+                cashflows.append(0)
+
+        cashflows[-1] += portfolio
+
+        sim_monthly_irr = npf.irr(cashflows)
+        if np.isfinite(sim_monthly_irr):
+            simulation_irrs[sim] = ((1 + sim_monthly_irr) ** 12) - 1
 
     median_path=np.median(all_paths,axis=0)
 
     naive_path=[opening_portfolio]
     portfolio=opening_portfolio
     monthly_growth=((1+annual_return)**(1/12))-1
+
     for _ in range(months):
         portfolio += monthly_cashflow
         if portfolio>0:
@@ -113,26 +135,46 @@ if st.button('Run Simulation'):
         naive_path.append(portfolio)
 
     naive_terminal=naive_path[-1]
+
     median_terminal=np.median(terminal_values)
     mean_terminal=np.mean(terminal_values)
     p5=np.percentile(terminal_values,5)
     p95=np.percentile(terminal_values,95)
     probability_ruin=bankrupt_count/int(num_sims)
 
+    valid_irrs = simulation_irrs[np.isfinite(simulation_irrs)]
+    if len(valid_irrs) > 0:
+        median_irr=np.median(valid_irrs)
+        p5_irr=np.percentile(valid_irrs,5)
+        p95_irr=np.percentile(valid_irrs,95)
+        best_irr=np.max(valid_irrs)
+        worst_irr=np.min(valid_irrs)
+    else:
+        median_irr=p5_irr=p95_irr=best_irr=worst_irr=np.nan
+
     c1,c2,c3 = st.columns(3)
     c1.metric('Median Terminal Value', f'${median_terminal:,.0f}')
     c2.metric('Mean Terminal Value', f'${mean_terminal:,.0f}')
     c3.metric('Smooth Forecast', f'${naive_terminal:,.0f}')
 
-    st.write(f'5th Percentile: ${p5:,.0f}')
-    st.write(f'95th Percentile: ${p95:,.0f}')
+    st.write(f'5th Percentile Portfolio Value: ${p5:,.0f}')
+    st.write(f'95th Percentile Portfolio Value: ${p95:,.0f}')
     st.write(f'Probability of Ruin: {probability_ruin:.2%}')
+
+    st.subheader('IRR Distribution')
+    st.write(f'Median Simulation IRR: {median_irr*100:.2f}%')
+    st.write(f'5th Percentile IRR: {p5_irr*100:.2f}%')
+    st.write(f'95th Percentile IRR: {p95_irr*100:.2f}%')
+    st.write(f'Best IRR: {best_irr*100:.2f}%')
+    st.write(f'Worst IRR: {worst_irr*100:.2f}%')
 
     fig, ax = plt.subplots(figsize=(12,7))
     num_display=min(20,int(num_sims))
     sample_indices=np.random.choice(int(num_sims), size=num_display, replace=False)
+
     for idx in sample_indices:
         ax.plot(all_paths[idx], color='lightgray', linewidth=1)
+
     ax.plot(median_path, color='blue', linewidth=3, label='Median Monte Carlo Outcome')
     ax.plot(naive_path, color='green', linewidth=3, label='Smooth Growth Forecast')
     ax.axhline(0,color='red',linestyle='--',linewidth=2,label='Ruin Level')
@@ -141,5 +183,11 @@ if st.button('Run Simulation'):
     ax.set_ylabel('Portfolio Value ($)')
     ax.legend()
     ax.grid(True, alpha=0.3)
-    ax.yaxis.set_major_formatter(ticker.FuncFormatter(lambda x,p: f'${x/1_000_000:.1f}M' if abs(x)>=1000000 else f'${x:,.0f}'))
+
+    ax.yaxis.set_major_formatter(
+        ticker.FuncFormatter(
+            lambda x,p: f'${x/1_000_000:.1f}M' if abs(x)>=1000000 else f'${x:,.0f}'
+        )
+    )
+
     st.pyplot(fig)
